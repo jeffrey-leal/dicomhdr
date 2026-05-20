@@ -1,0 +1,2 @@
+cd /c/Users/jeffr/source/repos/dicomhdr
+CGO_ENABLED=1 CC=/c/msys64/mingw64/bin/gcc.exe GOAMD64=v3 go build -ldflags="-s -w -H windowsgui -X main.buildDate=$(date +%Y-%m-%d)" -o dicomhdr.exe .
