@@ -2,6 +2,15 @@
 
 All notable changes to dicomhdr are documented here.
 
+## [1.0.3] - 2026-05-22
+
+### Changed
+- `CREDITS.md` expanded with itemised list of AI assistance contributions,
+  new Build Toolchain section (Go, CGo, MSYS2 MinGW64 GCC), library table
+  split into Direct and Notable Indirect dependencies.
+
+---
+
 ## [1.0.2] - 2026-05-22
 
 ### Added

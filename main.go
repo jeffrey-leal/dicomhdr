@@ -22,7 +22,7 @@ import (
 	"github.com/suyashkumar/dicom"
 )
 
-const version = "1.0.2"
+const version = "1.0.3"
 const dicomDictEdition = "DICOM 2024b"
 
 // buildDate is injected at link time: -ldflags "-X main.buildDate=YYYY-MM-DD"
