@@ -22,7 +22,7 @@ import (
 	"github.com/suyashkumar/dicom"
 )
 
-const version = "1.0.1"
+const version = "1.0.2"
 const dicomDictEdition = "DICOM 2024b"
 
 // buildDate is injected at link time: -ldflags "-X main.buildDate=YYYY-MM-DD"
@@ -373,9 +373,27 @@ func main() {
 	helpMenu := fyne.NewMenu("Help",
 		fyne.NewMenuItem("About", func() {
 			lbl := widget.NewLabel(fmt.Sprintf(
-				"dicomhdr\nVersion %s\nDICOM Data Dictionary: %s\nBuild date: %s",
-				version, dicomDictEdition, bd))
-			dialog.ShowCustom("About dicomhdr", "OK", lbl, w)
+				"dicomhdr  v%s  (built %s)\n"+
+					"DICOM file inspector — browse and inspect DICOM tag hierarchies.\n"+
+					"Data dictionary: %s\n\n"+
+					"Developer\n"+
+					"  Jeffrey Leal  <jeffrey.leal@gmail.com>\n"+
+					"  https://github.com/jeffrey-leal\n\n"+
+					"AI Assistance\n"+
+					"  Claude Sonnet 4.6 by Anthropic  (https://anthropic.com)\n"+
+					"  Architecture, code generation, and DICOM standard research.\n\n"+
+					"DICOM Standard Reference\n"+
+					"  DICOM PS3 (2024b) — https://dicom.nema.org/medical/dicom/current\n\n"+
+					"Open-Source Libraries\n"+
+					"  fyne.io/fyne/v2 v2.7.3          Fyne.io — GUI framework (BSD 3-Clause)\n"+
+					"  github.com/suyashkumar/dicom     Suyash Kumar — DICOM parsing (MIT)\n"+
+					"  github.com/sqweek/dialog         sqweek — native file dialogs (ISC)\n\n"+
+					"Full credits: CREDITS.md in the project repository.",
+				version, bd, dicomDictEdition))
+			lbl.TextStyle = fyne.TextStyle{Monospace: true}
+			d := dialog.NewCustom("About dicomhdr", "OK", container.NewPadded(lbl), w)
+			d.Resize(fyne.NewSize(580, 0))
+			d.Show()
 		}),
 	)
 

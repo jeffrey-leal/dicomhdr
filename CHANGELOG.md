@@ -2,6 +2,16 @@
 
 All notable changes to dicomhdr are documented here.
 
+## [1.0.2] - 2026-05-22
+
+### Added
+- `CREDITS.md` — full attribution for developer, AI assistance, DICOM standard
+  reference, and all open-source libraries
+- About dialog updated to match dicomqr style: monospace layout with developer,
+  AI assistance, DICOM standard reference, and library credits
+
+---
+
 ## [1.0.1] - 2026-04-29
 
 ### Added
