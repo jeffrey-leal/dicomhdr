@@ -13,8 +13,8 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -22,7 +22,7 @@ import (
 	"github.com/suyashkumar/dicom"
 )
 
-const version = "1.0.3"
+const version = "1.0.5"
 const dicomDictEdition = "DICOM 2024b"
 
 // buildDate is injected at link time: -ldflags "-X main.buildDate=YYYY-MM-DD"
@@ -188,7 +188,12 @@ func main() {
 		searchEntry,
 	)
 
-	var progressBar *widget.ProgressBar
+	var progressBar *widget.ProgressBarInfinite
+
+	// refreshInterval throttles how often the tree is re-rendered during a
+	// folder load. Refreshing after every file is O(visible nodes) per file —
+	// quadratic for large folders and floods the UI thread.
+	const refreshInterval = 150 * time.Millisecond
 
 	loadPath := func(path string) {
 		info, err := os.Stat(path)
@@ -196,47 +201,49 @@ func main() {
 			return
 		}
 		if info.IsDir() {
-			// Phase 1: discover all DICOM files so we know the total.
-			var paths []string
+			// Single pass: walk the folder and parse each DICOM file as it is
+			// discovered, populating the tree incrementally so the user sees
+			// rows appear while loading rather than waiting for a full pre-scan.
+			// The tree is refreshed at most once per refreshInterval to keep the
+			// UI responsive without flooding it. An indeterminate progress bar
+			// runs for the duration; the live "Files loaded: N" status carries
+			// the concrete feedback (the total is unknown until the walk ends).
+			fyne.Do(func() { progressBar.Show() })
+			var lastRefresh time.Time
 			filepath.WalkDir(path, func(p string, entry os.DirEntry, err error) error {
 				if err != nil || entry.IsDir() || !isDICOMFile(p) {
 					return nil
 				}
-				paths = append(paths, p)
-				return nil
-			})
-			total := len(paths)
-			if total == 0 {
-				return
-			}
-			fyne.Do(func() { progressBar.SetValue(0); progressBar.Show() })
-
-			// Phase 2: parse each file, updating progress after every file.
-			for i, p := range paths {
-				ds, err := dicom.ParseFile(p, nil)
-				frac := float64(i+1) / float64(total)
-				if err != nil {
+				ds, perr := safeParse(p)
+				if perr != nil {
 					loadErrMu.Lock()
-					loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", p, err))
+					loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", p, perr))
 					loadErrMu.Unlock()
 					errCount.Add(1)
-					fyne.Do(func() { updateStatus(); progressBar.SetValue(frac) })
-					continue
+				} else {
+					model.addDataset(ds)
+					filesLoaded.Add(1)
 				}
-				model.addDataset(ds)
-				filesLoaded.Add(1)
-				fyne.Do(func() {
-					updateStatus()
-					tree.Refresh()
-					progressBar.SetValue(frac)
-				})
-			}
-			fyne.Do(func() { progressBar.Hide() })
+				if now := time.Now(); now.Sub(lastRefresh) >= refreshInterval {
+					lastRefresh = now
+					fyne.Do(func() {
+						updateStatus()
+						tree.Refresh()
+					})
+				}
+				return nil
+			})
+			// Final refresh guarantees the last batch of files is shown.
+			fyne.Do(func() {
+				updateStatus()
+				tree.Refresh()
+				progressBar.Hide()
+			})
 		} else {
 			if !isDICOMFile(path) {
 				return
 			}
-			ds, err := dicom.ParseFile(path, nil)
+			ds, err := safeParse(path)
 			if err != nil {
 				loadErrMu.Lock()
 				loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", path, err))
@@ -254,24 +261,42 @@ func main() {
 		}
 	}
 
-	openFile := func() {
+	// beginLoad runs work on a background goroutine, but only one load may run
+	// at a time. A single shared progress bar and the parse loop cannot be
+	// driven by two concurrent loads safely, so overlapping requests are
+	// rejected with a notice rather than corrupting the UI.
+	var loading atomic.Bool
+	beginLoad := func(work func()) {
+		if !loading.CompareAndSwap(false, true) {
+			fyne.Do(func() {
+				dialog.ShowInformation("Busy", "A load is already in progress.", w)
+			})
+			return
+		}
 		go func() {
+			defer loading.Store(false)
+			work()
+		}()
+	}
+
+	openFile := func() {
+		beginLoad(func() {
 			path, err := sqweekdialog.File().Load()
 			if err != nil {
 				return
 			}
 			loadPath(path)
-		}()
+		})
 	}
 
 	loadFolder := func() {
-		go func() {
+		beginLoad(func() {
 			folderPath, err := sqweekdialog.Directory().Browse()
 			if err != nil {
 				return
 			}
 			loadPath(folderPath)
-		}()
+		})
 	}
 
 	// Keyboard shortcuts — openFile and loadFolder must be defined first.
@@ -400,7 +425,7 @@ func main() {
 	w.SetMainMenu(fyne.NewMainMenu(fileMenu, optionsMenu, helpMenu))
 
 	w.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
-		go func() {
+		beginLoad(func() {
 			for _, uri := range uris {
 				// Fyne represents Windows paths as /C:/foo/bar — strip the leading slash.
 				p := uri.Path()
@@ -409,7 +434,7 @@ func main() {
 				}
 				loadPath(filepath.FromSlash(p))
 			}
-		}()
+		})
 	})
 
 	go func() {
@@ -421,7 +446,7 @@ func main() {
 		}
 	}()
 
-	progressBar = widget.NewProgressBar()
+	progressBar = widget.NewProgressBarInfinite()
 	progressBar.Hide()
 
 	statusBar := container.NewVBox(
@@ -429,10 +454,41 @@ func main() {
 		progressBar,
 	)
 
+	// widget.Tree is itself a scrolling, virtualizing container — it renders
+	// only the rows currently in view and owns its scroll offset. It must be
+	// placed directly in the layout; wrapping it in container.NewScroll gives it
+	// unbounded height and hijacks the scroll offset, which breaks row recycling
+	// and leaves rows blank after scrolling until a manual refresh.
 	w.SetContent(container.NewBorder(
 		searchBar, statusBar, nil, nil,
-		container.NewScroll(tree),
+		tree,
 	))
 
 	w.ShowAndRun()
+}
+
+// safeParse parses a DICOM file for header inspection. It is hardened against
+// the realities of inspecting untrusted, possibly-corrupt files:
+//
+//   - SkipPixelData: the app never displays pixel content (only a frame count),
+//     so the bulk of every image file is skipped — a large load-time and memory
+//     win. The PixelData element is still emitted (IntentionallySkipped), so the
+//     tag remains visible in the tree.
+//   - AllowMismatchPixelDataLength / AllowMissingMetaElementGroupLength /
+//     AllowUnknownSpecificCharacterSet: tolerate common off-spec encodings so
+//     slightly malformed files load instead of failing outright.
+//   - recover: a panic inside the parser on adversarial input is converted to an
+//     error for that one file rather than crashing the whole application.
+func safeParse(path string) (ds dicom.Dataset, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("parser panic: %v", r)
+		}
+	}()
+	return dicom.ParseFile(path, nil,
+		dicom.SkipPixelData(),
+		dicom.AllowMismatchPixelDataLength(),
+		dicom.AllowMissingMetaElementGroupLength(),
+		dicom.AllowUnknownSpecificCharacterSet(),
+	)
 }

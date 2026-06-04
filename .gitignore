@@ -1,6 +1,9 @@
 # Compiled binary
 *.exe
 
+# Generated Windows resource object (icon), produced by build-release.sh
+*.syso
+
 # Go build cache
 /vendor/
 
