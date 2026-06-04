@@ -22,7 +22,7 @@ import (
 	"github.com/suyashkumar/dicom"
 )
 
-const version = "1.0.5"
+const version = "1.0.6"
 const dicomDictEdition = "DICOM 2024b"
 
 // buildDate is injected at link time: -ldflags "-X main.buildDate=YYYY-MM-DD"
@@ -180,7 +180,13 @@ func main() {
 	searchBtn := widget.NewButton("Search", doSearch)
 	clearBtn := widget.NewButton("Clear", doClear)
 	expandBtn := widget.NewButton("Expand All", func() { tree.OpenAllBranches() })
-	collapseBtn := widget.NewButton("Collapse All", func() { tree.CloseAllBranches() })
+	collapseBtn := widget.NewButton("Collapse All", func() {
+		// Reset the scroll offset first: collapsing shrinks the content height,
+		// and CloseAllBranches does not clamp the offset, so a viewport scrolled
+		// past the new (shorter) content would otherwise be left blank.
+		tree.ScrollToTop()
+		tree.CloseAllBranches()
+	})
 	searchBar := container.NewBorder(
 		nil, nil,
 		container.NewHBox(expandBtn, collapseBtn),

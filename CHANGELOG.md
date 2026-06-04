@@ -2,6 +2,17 @@
 
 All notable changes to dicomhdr are documented here.
 
+## [1.0.6] - 2026-06-04
+
+### Fixed
+- **Collapse All no longer leaves the tree blank.** When the tree had been
+  scrolled down, collapsing every branch shrank the content below the current
+  scroll position, leaving the viewport parked past the end of the (now shorter)
+  tree with nothing visible and no way to scroll back up. Collapse All now resets
+  the scroll to the top first, so the top-level nodes are always shown.
+
+---
+
 ## [1.0.5] - 2026-06-04
 
 ### Added
