@@ -11,6 +11,13 @@ All notable changes to dicomhdr are documented here.
   tree with nothing visible and no way to scroll back up. Collapse All now resets
   the scroll to the top first, so the top-level nodes are always shown.
 
+### Documentation
+- **User manual reformatted** to match the dicomtool manual layout: a dedicated
+  title page (DICOMHdr logo, application name, manual version, build date, and a
+  one-line description) with all content centred horizontally and vertically, and
+  a running header (`dicomhdr` / `Page: N`) and footer (developer attribution) on
+  the body pages.
+
 ---
 
 ## [1.0.5] - 2026-06-04
