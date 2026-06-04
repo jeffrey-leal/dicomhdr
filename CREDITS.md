@@ -74,3 +74,12 @@ core rendering and text handling within the application:
 
 A full list of all transitive dependencies and their versions is recorded in
 `go.sum`.
+
+---
+
+## Project License
+
+dicomhdr is released under the MIT License — see the [LICENSE](LICENSE) file.
+
+The open-source libraries listed above are used under their respective licenses
+(BSD 3-Clause, MIT, and ISC), each of which permits this use with attribution.
