@@ -136,6 +136,30 @@ func hexToColor(s string) color.Color {
 	return color.RGBA{R: 0xE5, G: 0x45, B: 0x45, A: 0xFF}
 }
 
+// cardBorderColor is the theme foreground at reduced opacity — a darker, clearly
+// visible card outline in light mode and a light one in dark mode.
+func cardBorderColor() color.Color {
+	r, g, b, _ := theme.Color(theme.ColorNameForeground).RGBA()
+	return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 0xB0}
+}
+
+// sectionCard wraps content in a titled, bordered panel. Unlike widget.Card it
+// uses a body-size bold heading (rather than the oversized heading text size)
+// and a defined, darker border instead of a soft shadow.
+func sectionCard(title string, content fyne.CanvasObject) fyne.CanvasObject {
+	heading := canvas.NewText(title, theme.Color(theme.ColorNameForeground))
+	heading.TextStyle = fyne.TextStyle{Bold: true}
+	heading.TextSize = theme.TextSize()
+
+	box := canvas.NewRectangle(theme.Color(theme.ColorNameInputBackground))
+	box.StrokeColor = cardBorderColor()
+	box.StrokeWidth = 1
+	box.CornerRadius = theme.Size(theme.SizeNameInputRadius)
+
+	body := container.NewPadded(container.NewVBox(heading, content))
+	return container.NewStack(box, body)
+}
+
 // showPreferencesDialog opens the preferences dialog, applying changes on confirm.
 func showPreferencesDialog(a fyne.App, w fyne.Window, current *appTheme, italicPrivate *atomic.Bool, malformedColor *atomic.Value, profiles *atomic.Value, treeRefresh func()) {
 	themeLabel := "Light"
@@ -153,7 +177,7 @@ func showPreferencesDialog(a fyne.App, w fyne.Window, current *appTheme, italicP
 		fontSelect.SetSelected("(default)")
 	}
 
-	italicCheck := widget.NewCheck("Italicize private tags", nil)
+	italicCheck := widget.NewCheck("Italicize", nil)
 	italicCheck.SetChecked(italicPrivate.Load())
 
 	pendingColor, _ := malformedColor.Load().(color.Color)
@@ -229,31 +253,20 @@ func showPreferencesDialog(a fyne.App, w fyne.Window, current *appTheme, italicP
 	profileScroll := container.NewScroll(profileList)
 	profileScroll.SetMinSize(fyne.NewSize(0, 120))
 
-	// UI section
-	uiHeader := widget.NewLabel("UI")
-	uiHeader.TextStyle = fyne.TextStyle{Bold: true}
-	uiSection := container.NewVBox(
-		uiHeader,
-		widget.NewSeparator(),
-		widget.NewForm(
-			widget.NewFormItem("Theme", themeSelect),
-			widget.NewFormItem("Tree font", fontSelect),
-		),
-	)
+	// Each logical group is a titled, bordered card so the sections are visually
+	// distinct rather than a flat stack of labels.
+	uiCard := sectionCard("Appearance", widget.NewForm(
+		widget.NewFormItem("Theme", themeSelect),
+		widget.NewFormItem("Tree font", fontSelect),
+	))
 
-	// Tag Highlights section
-	hlHeader := widget.NewLabel("Tag Highlights")
-	hlHeader.TextStyle = fyne.TextStyle{Bold: true}
-	hlSection := container.NewVBox(
-		hlHeader,
-		widget.NewSeparator(),
-		widget.NewForm(
-			widget.NewFormItem("Display", italicCheck),
-			widget.NewFormItem("Malformed tag color", container.NewHBox(swatch, changeColorBtn)),
-		),
-		widget.NewLabel("Tag Profiles"),
-		profileScroll,
-		addProfileBtn,
+	hlCard := sectionCard("Tag Highlights", widget.NewForm(
+		widget.NewFormItem("Private tags", italicCheck),
+		widget.NewFormItem("Malformed tag", container.NewHBox(swatch, changeColorBtn)),
+	))
+
+	profileCard := sectionCard("Tag Profiles",
+		container.NewBorder(nil, addProfileBtn, nil, nil, profileScroll),
 	)
 
 	// Button row: separator at top, buttons pinned to the bottom of a taller area.
@@ -303,7 +316,7 @@ func showPreferencesDialog(a fyne.App, w fyne.Window, current *appTheme, italicP
 		),
 	)
 
-	content := container.NewVBox(uiSection, hlSection, buttonRow)
+	content := container.NewVBox(uiCard, hlCard, profileCard, buttonRow)
 	d = dialog.NewCustomWithoutButtons("Preferences", content, w)
 	d.Show()
 }

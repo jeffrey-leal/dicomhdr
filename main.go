@@ -1,10 +1,14 @@
 package main
 
 import (
+	_ "embed"
+	"errors"
 	"fmt"
 	"image/color"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +16,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
@@ -22,11 +27,18 @@ import (
 	"github.com/suyashkumar/dicom"
 )
 
-const version = "1.0.6"
+const version = "1.0.7"
 const dicomDictEdition = "DICOM 2024b"
 
 // buildDate is injected at link time: -ldflags "-X main.buildDate=YYYY-MM-DD"
 var buildDate string
+
+// logoPNG is the application logo shown in the About dialog. A 256x256 downscale
+// of "DICOMHdr Logo.png" — ample for the ~112px display size — kept small so the
+// embedded copy adds ~78 KB to the binary instead of ~1.6 MB.
+//
+//go:embed "DICOMHdr Logo Small.png"
+var logoPNG []byte
 
 // rowLayout adds vertical padding around a single child, keeping it centred.
 type rowLayout struct{}
@@ -51,7 +63,7 @@ func (rowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 func main() {
 	a := app.NewWithID("com.jeffreyleal.dicomhdr")
 	w := a.NewWindow("dicomhdr")
-	w.Resize(fyne.NewSize(800, 600))
+	w.Resize(defaultWindowSize())
 
 	// Ensure ~/.dcomhdr/settings.json exists, then load it.
 	ensureDefaultSettings()
@@ -82,6 +94,9 @@ func main() {
 	var errCount atomic.Int64
 	var loadErrMu sync.Mutex
 	var loadErrors []string
+	// loadDuration holds the wall-clock time of the most recent load (0 = none),
+	// shown in the status bar once a load completes.
+	var loadDuration atomic.Value
 
 	statusLabel := widget.NewLabel("v" + version)
 	clockLabel := widget.NewLabel("")
@@ -96,6 +111,9 @@ func main() {
 		text := fmt.Sprintf("Files loaded: %d", n)
 		if e > 0 {
 			text += fmt.Sprintf("  |  Errors: %d", e)
+		}
+		if d, ok := loadDuration.Load().(time.Duration); ok && d > 0 {
+			text += "  |  " + formatLoadTime(d)
 		}
 		statusLabel.SetText(text)
 	}
@@ -207,49 +225,91 @@ func main() {
 			return
 		}
 		if info.IsDir() {
-			// Single pass: walk the folder and parse each DICOM file as it is
-			// discovered, populating the tree incrementally so the user sees
-			// rows appear while loading rather than waiting for a full pre-scan.
-			// The tree is refreshed at most once per refreshInterval to keep the
-			// UI responsive without flooding it. An indeterminate progress bar
-			// runs for the duration; the live "Files loaded: N" status carries
-			// the concrete feedback (the total is unknown until the walk ends).
+			// Walk the folder and parse files concurrently across a worker pool —
+			// parsing (open + decode header) is the dominant per-file cost and is
+			// independent per file, so it scales with core count. Tree insertion
+			// (model.addDataset) is serialised by the model's own mutex, and node
+			// identity is key-based, so insertion order does not affect the result.
+			// A background ticker refreshes the tree at most once per refreshInterval
+			// while the workers run, keeping rows appearing incrementally.
 			fyne.Do(func() { progressBar.Show() })
-			var lastRefresh time.Time
+			loadDuration.Store(time.Duration(0))
+			start := time.Now()
+
+			paths := make(chan string, 256)
+			workers := runtime.NumCPU()
+			if workers < 1 {
+				workers = 1
+			}
+			var wg sync.WaitGroup
+			for i := 0; i < workers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for p := range paths {
+						ds, perr := parseDICOM(p)
+						switch {
+						case errors.Is(perr, errNotDICOM):
+							// not a DICOM file — skip silently
+						case perr != nil:
+							loadErrMu.Lock()
+							loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", p, perr))
+							loadErrMu.Unlock()
+							errCount.Add(1)
+						default:
+							model.addDataset(ds)
+							filesLoaded.Add(1)
+						}
+					}
+				}()
+			}
+
+			// Throttled tree refresh while the workers run.
+			stopRefresh := make(chan struct{})
+			var refreshWG sync.WaitGroup
+			refreshWG.Add(1)
+			go func() {
+				defer refreshWG.Done()
+				t := time.NewTicker(refreshInterval)
+				defer t.Stop()
+				for {
+					select {
+					case <-stopRefresh:
+						return
+					case <-t.C:
+						fyne.Do(func() {
+							updateStatus()
+							tree.Refresh()
+						})
+					}
+				}
+			}()
+
 			filepath.WalkDir(path, func(p string, entry os.DirEntry, err error) error {
-				if err != nil || entry.IsDir() || !isDICOMFile(p) {
+				if err != nil || entry.IsDir() {
 					return nil
 				}
-				ds, perr := safeParse(p)
-				if perr != nil {
-					loadErrMu.Lock()
-					loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", p, perr))
-					loadErrMu.Unlock()
-					errCount.Add(1)
-				} else {
-					model.addDataset(ds)
-					filesLoaded.Add(1)
-				}
-				if now := time.Now(); now.Sub(lastRefresh) >= refreshInterval {
-					lastRefresh = now
-					fyne.Do(func() {
-						updateStatus()
-						tree.Refresh()
-					})
-				}
+				paths <- p
 				return nil
 			})
-			// Final refresh guarantees the last batch of files is shown.
+			close(paths)
+			wg.Wait()
+			close(stopRefresh)
+			refreshWG.Wait()
+
+			loadDuration.Store(time.Since(start))
 			fyne.Do(func() {
 				updateStatus()
 				tree.Refresh()
 				progressBar.Hide()
 			})
 		} else {
-			if !isDICOMFile(path) {
-				return
+			loadDuration.Store(time.Duration(0))
+			start := time.Now()
+			ds, err := parseDICOM(path)
+			if errors.Is(err, errNotDICOM) {
+				return // not a DICOM file — silently ignore
 			}
-			ds, err := safeParse(path)
 			if err != nil {
 				loadErrMu.Lock()
 				loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", path, err))
@@ -260,6 +320,7 @@ func main() {
 			}
 			model.addDataset(ds)
 			filesLoaded.Add(1)
+			loadDuration.Store(time.Since(start))
 			fyne.Do(func() {
 				updateStatus()
 				tree.Refresh()
@@ -368,6 +429,7 @@ func main() {
 			model.clear()
 			filesLoaded.Store(0)
 			errCount.Store(0)
+			loadDuration.Store(time.Duration(0))
 			loadErrMu.Lock()
 			loadErrors = loadErrors[:0]
 			loadErrMu.Unlock()
@@ -403,27 +465,43 @@ func main() {
 	}
 	helpMenu := fyne.NewMenu("Help",
 		fyne.NewMenuItem("About", func() {
-			lbl := widget.NewLabel(fmt.Sprintf(
+			// The header sits to the left of the logo (upper-right); the remaining
+			// sections flow full-width beneath it. Fyne has no true inline
+			// text-wrap around an image, so this is a border-based approximation:
+			// a top row (text | logo) above a full-width continuation.
+			topLbl := widget.NewLabel(fmt.Sprintf(
 				"dicomhdr  v%s  (built %s)\n"+
-					"DICOM file inspector — browse and inspect DICOM tag hierarchies.\n"+
+					"DICOM file inspector — browse and\n"+
+					"inspect DICOM tag hierarchies.\n"+
 					"Data dictionary: %s\n\n"+
 					"Developer\n"+
 					"  Jeffrey Leal  <jeffrey.leal@gmail.com>\n"+
-					"  https://github.com/jeffrey-leal\n\n"+
-					"AI Assistance\n"+
-					"  Claude Sonnet 4.6 by Anthropic  (https://anthropic.com)\n"+
-					"  Architecture, code generation, and DICOM standard research.\n\n"+
-					"DICOM Standard Reference\n"+
-					"  DICOM PS3 (2024b) — https://dicom.nema.org/medical/dicom/current\n\n"+
-					"Open-Source Libraries\n"+
-					"  fyne.io/fyne/v2 v2.7.3          Fyne.io — GUI framework (BSD 3-Clause)\n"+
-					"  github.com/suyashkumar/dicom     Suyash Kumar — DICOM parsing (MIT)\n"+
-					"  github.com/sqweek/dialog         sqweek — native file dialogs (ISC)\n\n"+
-					"Full credits: CREDITS.md in the project repository.",
+					"  https://github.com/jeffrey-leal",
 				version, bd, dicomDictEdition))
-			lbl.TextStyle = fyne.TextStyle{Monospace: true}
-			d := dialog.NewCustom("About dicomhdr", "OK", container.NewPadded(lbl), w)
-			d.Resize(fyne.NewSize(580, 0))
+			topLbl.TextStyle = fyne.TextStyle{Monospace: true}
+
+			bottomLbl := widget.NewLabel(
+				"AI Assistance\n" +
+					"  Claude Sonnet 4.6 by Anthropic  (https://anthropic.com)\n" +
+					"  Architecture, code generation, and DICOM standard research.\n\n" +
+					"DICOM Standard Reference\n" +
+					"  DICOM PS3 (2024b) — https://dicom.nema.org/medical/dicom/current\n\n" +
+					"Open-Source Libraries\n" +
+					"  fyne.io/fyne/v2 v2.7.3          Fyne.io — GUI framework (BSD 3-Clause)\n" +
+					"  github.com/suyashkumar/dicom     Suyash Kumar — DICOM parsing (MIT)\n" +
+					"  github.com/sqweek/dialog         sqweek — native file dialogs (ISC)\n\n" +
+					"Full credits: CREDITS.md in the project repository.")
+			bottomLbl.TextStyle = fyne.TextStyle{Monospace: true}
+
+			logo := canvas.NewImageFromResource(fyne.NewStaticResource("dicomhdr-logo.png", logoPNG))
+			logo.FillMode = canvas.ImageFillContain
+			logo.SetMinSize(fyne.NewSize(112, 112))
+
+			topRow := container.NewBorder(nil, nil, nil, container.NewVBox(logo), topLbl)
+			content := container.NewVBox(topRow, bottomLbl)
+
+			d := dialog.NewCustom("About dicomhdr", "OK", container.NewPadded(content), w)
+			d.Resize(fyne.NewSize(600, 0))
 			d.Show()
 		}),
 	)
@@ -470,31 +548,93 @@ func main() {
 		tree,
 	))
 
+	// Guarantee the process terminates when the window is closed. On Windows the
+	// Fyne/GLFW run loop can intermittently fail to return from ShowAndRun while
+	// background goroutines (the clock tick, an in-progress load) are still
+	// calling into Fyne — the window vanishes but the process lingers
+	// (fyne-io/fyne#6021, #2314). SetCloseIntercept fires on the close event
+	// itself, before that racy teardown, so exiting here is reliable. dicomhdr
+	// keeps no unsaved state (settings are written on Apply), so an immediate
+	// exit is safe.
+	w.SetCloseIntercept(func() { os.Exit(0) })
+
 	w.ShowAndRun()
+	os.Exit(0) // also covers File > Quit and any normal return from the run loop
 }
 
-// safeParse parses a DICOM file for header inspection. It is hardened against
-// the realities of inspecting untrusted, possibly-corrupt files:
-//
-//   - SkipPixelData: the app never displays pixel content (only a frame count),
-//     so the bulk of every image file is skipped — a large load-time and memory
-//     win. The PixelData element is still emitted (IntentionallySkipped), so the
-//     tag remains visible in the tree.
-//   - AllowMismatchPixelDataLength / AllowMissingMetaElementGroupLength /
-//     AllowUnknownSpecificCharacterSet: tolerate common off-spec encodings so
-//     slightly malformed files load instead of failing outright.
-//   - recover: a panic inside the parser on adversarial input is converted to an
-//     error for that one file rather than crashing the whole application.
-func safeParse(path string) (ds dicom.Dataset, err error) {
+// errNotDICOM marks a file that lacks the DICM signature. Callers skip such
+// files silently rather than recording them as parse errors.
+var errNotDICOM = errors.New("not a DICOM file")
+
+// parseDICOM opens path exactly once: it verifies the DICM signature, then
+// parses the header from the same handle (pixel data skipped). This avoids the
+// second open that a separate magic-byte check plus dicom.ParseFile would incur.
+// It returns errNotDICOM for non-DICOM files and recovers from parser panics so
+// one malformed file cannot crash the app.
+func parseDICOM(path string) (ds dicom.Dataset, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("parser panic: %v", r)
 		}
 	}()
-	return dicom.ParseFile(path, nil,
+
+	f, err := os.Open(path)
+	if err != nil {
+		return dicom.Dataset{}, err
+	}
+	defer f.Close()
+
+	var header [dicomMagicOffset + len(dicomMagic)]byte
+	if _, rerr := io.ReadFull(f, header[:]); rerr != nil {
+		return dicom.Dataset{}, errNotDICOM // too short to be a DICOM file
+	}
+	if !hasDICMSignature(header[:]) {
+		return dicom.Dataset{}, errNotDICOM
+	}
+
+	info, serr := f.Stat()
+	if serr != nil {
+		return dicom.Dataset{}, serr
+	}
+	if _, serr := f.Seek(0, io.SeekStart); serr != nil {
+		return dicom.Dataset{}, serr
+	}
+	return dicom.Parse(f, info.Size(), nil,
 		dicom.SkipPixelData(),
 		dicom.AllowMismatchPixelDataLength(),
 		dicom.AllowMissingMetaElementGroupLength(),
 		dicom.AllowUnknownSpecificCharacterSet(),
 	)
+}
+
+// defaultWindowSize returns the initial window size: at least 800x600, and at
+// least a quarter of the screen area (half the screen's width and height) when
+// the screen is larger than that. Falls back to 800x600 when the screen size is
+// unavailable (non-Windows, or if the metrics cannot be read).
+func defaultWindowSize() fyne.Size {
+	const minW, minH float32 = 800, 600
+	w, h := minW, minH
+	if cx, cy, dpi, ok := primaryScreenSizePx(); ok {
+		scale := float64(dpi) / 96.0
+		if scale <= 0 {
+			scale = 1
+		}
+		// Convert physical pixels to Fyne logical units, then take half of each
+		// dimension (= a quarter of the screen area).
+		if qw := float32(float64(cx) / scale / 2); qw > w {
+			w = qw
+		}
+		if qh := float32(float64(cy) / scale / 2); qh > h {
+			h = qh
+		}
+	}
+	return fyne.NewSize(w, h)
+}
+
+// formatLoadTime renders a load duration for the status bar.
+func formatLoadTime(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("loaded in %d ms", d.Milliseconds())
+	}
+	return fmt.Sprintf("loaded in %.2f s", d.Seconds())
 }

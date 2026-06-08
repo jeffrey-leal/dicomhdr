@@ -2,6 +2,46 @@
 
 All notable changes to dicomhdr are documented here.
 
+## [1.0.7] - 2026-06-08
+
+### Changed
+- **Preferences dialog grouped into cards.** The Appearance, Tag Highlights, and
+  Tag Profiles sections are now distinct titled cards instead of a flat list of
+  labels, making the groups easier to tell apart.
+- **Initial window size scales with the screen.** On first launch the window
+  opens at no less than a quarter of the screen (half its width and height),
+  falling back to 800×600 on smaller screens or when the screen size can't be
+  determined.
+- **Folder loads now parse files in parallel.** Parsing — the dominant per-file
+  cost — runs across a worker pool sized to the CPU count, while tree insertion
+  stays serialised by the model lock. On multi-core machines this substantially
+  speeds up loading large studies (gains are smaller on slow or network storage,
+  where loading is disk-bound). Rows still appear incrementally as files load.
+- **Each file is opened once instead of twice.** The DICM signature check and the
+  header parse now share a single open file handle, halving the open/stat calls
+  per file.
+- **Faster tree building for large series.** Instance nodes are inserted in sorted
+  position by binary search instead of re-sorting the whole sibling list on every
+  insert, and duplicate-node lookups now use a per-folder index — reducing
+  large-series ingestion from roughly O(N² log N) to O(N log N).
+
+### Added
+- **Logo in the About dialog.** The DICOMHdr logo is shown in the upper-right of
+  Help > About, with the text arranged around it.
+- **Load timer.** The status bar reports how long the most recent load took
+  (e.g. `Files loaded: 4210  |  loaded in 3.42 s`).
+- Images that share a sort position and lack a Slice Location and Instance Number
+  are now ordered deterministically by SOP Instance UID, so their order is stable
+  across loads despite parallel parsing.
+
+### Fixed
+- **Closing the window now reliably ends the process.** On Windows the Fyne run
+  loop could occasionally fail to exit when background goroutines were still
+  active, leaving the window closed but the process running. Closing the window
+  now terminates the process explicitly.
+
+---
+
 ## [1.0.6] - 2026-06-04
 
 ### Fixed

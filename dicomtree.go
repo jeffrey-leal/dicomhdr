@@ -14,8 +14,9 @@ import (
 
 type treeNode struct {
 	label       string
-	key         string // identity used to match datasets to this node; not displayed
-	children    []string
+	key         string            // identity used to match datasets to this node; not displayed
+	children    []string          // child node IDs, in display order
+	childKeys   map[string]string // key -> child ID, for O(1) findOrCreate (structural nodes only; lazily created)
 	sortKey     float64
 	isPrivate   bool
 	isMalformed bool
@@ -299,33 +300,47 @@ func orientationPlane(iop []float64) (plane string, axis int) {
 
 func (m *dicomTreeModel) findOrCreate(parentID, key, label string) string {
 	parent := m.nodes[parentID]
-	for _, childID := range parent.children {
-		if m.nodes[childID].key == key {
-			return childID
-		}
+	if id, ok := parent.childKeys[key]; ok {
+		return id
 	}
 	id := m.nextID()
 	m.nodes[id] = &treeNode{label: label, key: key}
 	parent.children = append(parent.children, id)
+	if parent.childKeys == nil {
+		parent.childKeys = make(map[string]string)
+	}
+	parent.childKeys[key] = id
 	return id
 }
 
 func (m *dicomTreeModel) findOrCreateSorted(parentID, key, label string, sortKey float64) string {
 	parent := m.nodes[parentID]
-	for _, childID := range parent.children {
-		if m.nodes[childID].key == key {
-			return childID
-		}
+	if id, ok := parent.childKeys[key]; ok {
+		return id
 	}
 	id := m.nextID()
 	m.nodes[id] = &treeNode{label: label, key: key, sortKey: sortKey}
-	parent.children = append(parent.children, id)
-	// Stable so instances sharing a sortKey (e.g. reformats with no Slice
-	// Location or Instance Number) keep their discovery order rather than
-	// reshuffling on each insert.
-	sort.SliceStable(parent.children, func(i, j int) bool {
-		return m.nodes[parent.children[i]].sortKey < m.nodes[parent.children[j]].sortKey
+	// Keep children ordered by (sortKey, key) via binary-search insertion (the
+	// slice is always sorted because every instance is inserted this way). This
+	// replaces a full re-sort on every insert — O(N log N) total instead of
+	// O(N² log N). The key (the SOP Instance UID, when present) is the tiebreaker
+	// so images sharing a sort position — e.g. reformats with no Slice Location or
+	// Instance Number — get a stable, deterministic order even under concurrent
+	// insertion, rather than depending on which worker happens to insert first.
+	idx := sort.Search(len(parent.children), func(i int) bool {
+		c := m.nodes[parent.children[i]]
+		if c.sortKey != sortKey {
+			return c.sortKey > sortKey
+		}
+		return c.key > key
 	})
+	parent.children = append(parent.children, "")
+	copy(parent.children[idx+1:], parent.children[idx:])
+	parent.children[idx] = id
+	if parent.childKeys == nil {
+		parent.childKeys = make(map[string]string)
+	}
+	parent.childKeys[key] = id
 	return id
 }
 
