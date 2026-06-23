@@ -2,6 +2,26 @@
 
 All notable changes to dicomhdr are documented here.
 
+## [1.0.8] - 2026-06-23
+
+### Changed
+- **Study date shown in study node label.** Each study is now labelled
+  `[YYYY-MM-DD] Study Description` instead of `Study Description` alone,
+  making it easy to tell apart studies that share the same description (e.g.
+  repeated follow-up CT scans). Studies with no Study Date (0008,0020) are
+  unaffected and continue to display the description only.
+- **Series time shown in series node label.** Each series is now labelled
+  `[HH:MM:SS] Series Description`, using Series Time (0008,0031), so series
+  within the same study that carry identical descriptions (e.g. multiple T1
+  acquisitions) are individually identifiable.
+- **Studies sorted by date, series sorted by time.** Study nodes within a
+  patient are ordered chronologically by Study Date (earliest first); series
+  nodes within a study are ordered chronologically by Series Time (earliest
+  first). Nodes that lack a date or time sort after all dated/timed nodes and
+  retain their insertion order among themselves.
+
+---
+
 ## [1.0.7] - 2026-06-08
 
 ### Changed

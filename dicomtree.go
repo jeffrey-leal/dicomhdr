@@ -178,6 +178,26 @@ func (m *dicomTreeModel) addDataset(ds dicom.Dataset) {
 	instanceNum := stringVal(ds, tag.Tag{Group: 0x0020, Element: 0x0013})
 	sliceLoc := stringVal(ds, tag.Tag{Group: 0x0020, Element: 0x1041})
 
+	studyDateRaw := stringVal(ds, tag.Tag{Group: 0x0008, Element: 0x0020})
+	studyLabel := studyDesc
+	studySortKey := math.MaxFloat64
+	if d := formatDICOMDate(studyDateRaw); d != "" {
+		studyLabel = "[" + d + "] " + studyDesc
+		if v, err := strconv.ParseFloat(studyDateRaw, 64); err == nil {
+			studySortKey = v
+		}
+	}
+
+	seriesTimeRaw := stringVal(ds, tag.Tag{Group: 0x0008, Element: 0x0031})
+	seriesLabel := seriesDesc
+	seriesSortKey := math.MaxFloat64
+	if t := formatDICOMTime(seriesTimeRaw); t != "" {
+		seriesLabel = "[" + t + "] " + seriesDesc
+		if v, err := strconv.ParseFloat(seriesTimeRaw[:6], 64); err == nil {
+			seriesSortKey = v
+		}
+	}
+
 	// Identity keys uniquely distinguish nodes that may share a display label.
 	// Each falls back to its label when the UID is absent, so files lacking the
 	// preferred identifier still group sensibly instead of all collapsing into
@@ -221,8 +241,8 @@ func (m *dicomTreeModel) addDataset(ds dicom.Dataset) {
 	defer m.mu.Unlock()
 
 	patientID := m.findOrCreate("", patientKey, patientName)
-	studyID := m.findOrCreate(patientID, studyKey, studyDesc)
-	seriesID := m.findOrCreate(studyID, seriesKey, seriesDesc)
+	studyID := m.findOrCreateSorted(patientID, studyKey, studyLabel, studySortKey)
+	seriesID := m.findOrCreateSorted(studyID, seriesKey, seriesLabel, seriesSortKey)
 	instanceID := m.findOrCreateSorted(seriesID, instanceKey, instanceLabel, sortKey)
 
 	for _, el := range ds.Elements {
@@ -399,6 +419,34 @@ func (m *dicomTreeModel) addElement(parentID string, el *dicom.Element) {
 		m.nodes[leafID] = &treeNode{label: prefix + ": " + formatValue(el), isPrivate: private, isMalformed: malformed, elmTag: el.Tag, hasTag: true}
 		m.nodes[parentID].children = append(m.nodes[parentID].children, leafID)
 	}
+}
+
+// formatDICOMDate converts a DICOM DA value (YYYYMMDD) to YYYY-MM-DD.
+// Returns "" when the input is absent, non-numeric, or not exactly 8 digits.
+func formatDICOMDate(s string) string {
+	if len(s) != 8 {
+		return ""
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	return s[0:4] + "-" + s[4:6] + "-" + s[6:8]
+}
+
+// formatDICOMTime converts a DICOM TM value (HHMMSS[.frac]) to HH:MM:SS.
+// Returns "" when the input is absent, shorter than 6 characters, or non-numeric.
+func formatDICOMTime(s string) string {
+	if len(s) < 6 {
+		return ""
+	}
+	for _, c := range s[:6] {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	return s[0:2] + ":" + s[2:4] + ":" + s[4:6]
 }
 
 func stringVal(ds dicom.Dataset, t tag.Tag) string {
